@@ -4,7 +4,7 @@
 # Copyright (c) 2013 Jose M. Ibanez All rights reserved.
 # Institute of Astrophysics of Andalusia, IAA-CSIC
 #
-# This file is part of ROPER CCD astrometry procedure
+# This file is part of OSN CCD astrometry procedure
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -215,11 +215,12 @@ def initWCS( input_image, pixel_scale):
             
 def checkWCS( header ):
     """
-    Checks for a variety of WCS keywords and raise an Exception if the header lacks a proper
-    combination of them.  This is needed because wcstools will not raise any
-    sort of error if a WCS isn't present or is malformed, and SCAMP (E.Bertin)
-    need a initial WCS information. This is probably 90% complete in terms of
-    its checking for the types of FITS files that we are likely to be using.
+    Checks for a variety of WCS keywords and raise an Exception if the header 
+    lacks a proper combination of them.  This is needed because wcstools will 
+    not raise any sort of error if a WCS isn't present or is malformed, and 
+    SCAMP (E.Bertin) need a initial WCS information. This is probably 90% 
+    complete in terms of its checking for the types of FITS files that we are 
+    likely to be using.
     
     If you find any WCS keywords that cause wcstools to behave in an erratic
     manner without signaling errors, add them to this method.  Experience has
@@ -275,31 +276,38 @@ def solveField(filename, pix_scale, tmp_dir):
     function 'solve-field'
     """
     
-    ## Create temporal directory
+    #
+    #Create temporal directory
+    #    
     if not os.path.isdir(tmp_dir):
         os.makedirs(tmp_dir)
     
+    #
+    # Check and prepare the header
+    #    
     scale = checkHeader(filename)
     
     ## Create log file
-    logging.debug("Starting to solve-Field to: %s  scale=%s  tmp_dir=%s"%(filename, scale, tmp_dir))
+    logging.debug("Starting to solve-Field to: %s  scale=%s  tmp_dir=%s"
+                    %(filename, scale, tmp_dir))
     
     ## Run calibration external command
-    """solve-field --scale-units arcsecperpix --scale-low 0.4 --scale-high 0.5 /home/panic/as/150/PG1647+056-003R.fit -O -d 20 -p"""
-    
-    str_cmd = "solve-field -O -p -d 10,20,30,40 --scale-units arcsecperpix --scale-low %s --scale-high %s %s"%(pix_scale-0.1, pix_scale+0.1, filename)
+    str_cmd = "solve-field -O -p -d 10,20,30,40 --scale-units arcsecperpix"
+    "--scale-low %s --scale-high %s %s"
+    "-D %s"%(pix_scale-0.1, pix_scale+0.1, filename, tmp_dir)
     
     try:
-        p = subprocess.Popen(str_cmd, bufsize=0, shell=True, stdin=subprocess.PIPE,
+        p = subprocess.Popen(str_cmd, bufsize=0, shell=True, 
+                             stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              close_fds=True)
     except Exception,e:
         raise e
 
-    #Warning
-    #We use communicate() rather than .stdin.write, .stdout.read or .stderr.read 
-    #to avoid deadlocks due to any of the other OS pipe buffers filling up and 
-    #blocking the child process.(Python Ref.doc)
+    # Warning:
+    # We use communicate() rather than .stdin.write, .stdout.read or .stderr.read 
+    # to avoid deadlocks due to any of the other OS pipe buffers filling up and 
+    # blocking the child process.(Python Ref.doc)
 
     (stdoutdata, stderrdata) = p.communicate()
     err = stdoutdata + " " + stderrdata
@@ -311,11 +319,17 @@ def solveField(filename, pix_scale, tmp_dir):
         print "[solveField]: STDOUT + STDERR = ", err
         logging.error(err)
     else:
-        logging.debug("Field solved !")
-
-################################################################################
+        #
+        # Look for filename.solved to know if field was solved
+        #
+        if os.path.exists(filename.replace(".fits", ".solved")):
+            logging.info("Field solved !")
+        else:
+            log.error("Field was not solved.")
+                    
+###############################################################################
 # main
-################################################################################
+###############################################################################
 if __name__ == "__main__":
     
     
@@ -332,7 +346,8 @@ in principle previously reduced, but not mandatory.
                   
     parser.add_option("-s", "--source",
                   action="store", dest="source_file",
-                  help="Source file list of data frames. It can be a file or directory name.")
+                  help="Source file list of data frames. "
+                  "It can be a file or directory name.")
     
     parser.add_option("-o", "--output",
                   action="store", dest="output_filename", 
