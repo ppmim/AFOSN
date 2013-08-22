@@ -20,6 +20,9 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
+
+from __future__ import division
+
 import sys
 import os
 import shutil
@@ -34,7 +37,33 @@ import numpy
 import pywcs
 import pyfits
 import sys
+import logging as log
 
+
+# Project modules
+import clfits
+
+def readHeader(filename):
+    """
+    Read from the FITS header values required for astrometric calibration
+    """
+    
+    try:
+        fits = clfits.ClFits(filename)
+    except Exception,e:
+        msg = "Error reading FITS file: " + filename
+        log.error(msg)
+        log.error(str(e))
+        raise e
+    else:
+        # Return values
+        scale = fits.pix_scale
+        ra = fits.ra
+        dec = fits.dec
+        instrument = fits.getInstrument()
+        return (scale, ra, dec, instrument)
+        
+            
 def checkHeader(filename):
     """
     Check header from OSN FITS files and return scale and instrument.
@@ -73,6 +102,22 @@ def checkHeader(filename):
     else:
         ybinning = -1
 
+
+    #
+    # Coordinates
+    #
+    if 'RA' in hdulist[0].header:
+        ra = hdulist[0].header['RA']
+    elif 'OBJCTRA' in hdulist[0].header:
+        ra_str =  hdulist[0].header['OBJCTRA']
+    else:
+        ra = -1
+            
+    if 'YBINNING' in hdulist[0].header:
+        ybinning = hdulist[0].header['XBINNING']
+    else:
+        ybinning = -1
+
     
     if instrument=='Roper':
         # pixel scale for Roper@T150 (eaest focus) is 0.23 arcsec/pixel
@@ -83,7 +128,7 @@ def checkHeader(filename):
     else:
         #default scale (?)
         scale = 0.45
-        
+    
     pix_scale_x = scale * xbinning
     pix_scale_y = scale * ybinning
     
@@ -120,8 +165,8 @@ def loadWCS(filename):
 def initWCS( input_image, pixel_scale):
     """
     Call this routine to write rough WCS into FITS header and update RA,DEC
-    coordinates to J2000.0 equinox; and this way allow SCAMP make astrometry
-    with external Catalogs (in J2000??).
+    coordinates to J2000.0 equinox; and this way allow SCAMP/Astrometry.net 
+    make astrometry with external Catalogs (in J2000??).
     
     Warning: The original file header (input_image) will be modified
     """
@@ -134,7 +179,8 @@ def initWCS( input_image, pixel_scale):
     fits_file = pyfits.open(input_image, 'update', ignore_missing_end=True)
 
     if f.isMEF(): # is a MEF
-        raise Exception("Sorry, currently this function only works with simple FITS files with no extensions")
+        raise Exception("Sorry, currently this function only works with simple "
+                        "FITS files with no extensions")
     else:  # is a simple FITS
         header = fits_file[0].header
         try:
@@ -283,18 +329,39 @@ def solveField(filename, pix_scale, tmp_dir):
         os.makedirs(tmp_dir)
     
     #
-    # Check and prepare the header
+    # Read header parameters
     #    
-    scale = checkHeader(filename)
+    (scale, ra, dec, instrument) = readHeader(filename)
     
     ## Create log file
-    logging.debug("Starting to solve-Field to: %s  scale=%s  tmp_dir=%s"
-                    %(filename, scale, tmp_dir))
+    logging.debug("Starting to solve-field for: %s  Scale=%s  RA= %s Dec= %s \
+    INSTRUMENT= %s"%(filename, scale, ra , dec, instrument))
     
-    ## Run calibration external command
-    str_cmd = "solve-field -O -p -d 10,20,30,40 --scale-units arcsecperpix"
-    "--scale-low %s --scale-high %s %s"
-    "-D %s"%(pix_scale-0.1, pix_scale+0.1, filename, tmp_dir)
+    path_astrometry = "/usr/local/astrometry/bin"  
+
+    #
+    # We must distinguish different cases
+    #
+
+    # 1) RA, Dec and Scale are known
+    if ra!=-1 and dec!=-1 and scale!=-1:
+        log.debug("RA, Dec and Scale are known")
+        str_cmd = "%s/solve-field -O -p --scale-units arcsecperpix --scale-low %s \
+        --scale-high %s --ra %s --dec %s --radius 0.1 -D %s %s\
+        "%(path_astrometry, scale-0.05, scale+0.05, ra, dec, tmp_dir, filename)
+    # 2) RA, Dec are unknown but scale is
+    elif ra==-1 or dec==-1:
+        log.debug("RA, Dec are unknown but scale is")
+        str_cmd = "%s/solve-field -O -p --scale-units arcsecperpix --scale-low %s \
+        --scale-high %s -D %s %s\
+        "%(path_astrometry, scale-0.1, scale+0.1, tmp_dir, filename)
+    # 3) None is known -- blind calibration
+    if (ra==-1 or dec==-1) and scale==-1:
+        log.debug("Nothing is known")
+        str_cmd = "%s/solve-field -O -p -D %s %s\
+        "%(path_astrometry, tmp_dir, filename)
+    
+    log.debug("CMD="+str_cmd)
     
     try:
         p = subprocess.Popen(str_cmd, bufsize=0, shell=True, 
@@ -310,22 +377,26 @@ def solveField(filename, pix_scale, tmp_dir):
     # blocking the child process.(Python Ref.doc)
 
     (stdoutdata, stderrdata) = p.communicate()
-    err = stdoutdata + " " + stderrdata
+    solve_out =  stdoutdata + "\n" + stderrdata
 
-    print "STDOUTDATA=",stdoutdata
-    print "STDERRDATA=",stderrdata
+    #print "STDOUTDATA=",stdoutdata
+    #print "STDERRDATA=",stderrdata
     
-    if len(err)>1:
-        print "[solveField]: STDOUT + STDERR = ", err
-        logging.error(err)
+    if len(solve_out)>1:
+        logging.info("Solve-field output:")
+        print solve_out
+    #
+    # Look for filename.solved to know if field was solved
+    #
+    solved_file = tmp_dir + "/" + os.path.splitext(os.path.basename(filename))[0] + ".solved"
+    #print "FILE=",solved_file
+    if os.path.exists(solved_file):
+        logging.info("Field solved !")
+        return 1
     else:
-        #
-        # Look for filename.solved to know if field was solved
-        #
-        if os.path.exists(filename.replace(".fits", ".solved")):
-            logging.info("Field solved !")
-        else:
-            log.error("Field was not solved.")
+        log.error("Field was not solved.")
+        raise Exception("Field was not solved")
+            
                     
 ###############################################################################
 # main
