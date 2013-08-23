@@ -40,6 +40,18 @@ import sys
 import logging as log
 
 
+# TODO
+#
+# - Comprobacion tipo de imagen no es bias, dark, flat, test  ---DONE
+# - Contabilidad de ficheros resueltos y no  ---DONE
+# - Tiempo límite de resolución de un fichero --cpulimit (default to 300s)
+# - Opcion de añadir header wcs a la cabecera (image.new) 
+# - Multiprocessing
+# - Estadísicas de errores de calibracion
+# - distorsion promedio (encontre un mail de Dustin donde hablaba de eso)
+# -
+
+
 # Project modules
 import clfits
 
@@ -61,105 +73,10 @@ def readHeader(filename):
         ra = fits.ra
         dec = fits.dec
         instrument = fits.getInstrument()
-        return (scale, ra, dec, instrument)
+        is_science = fits.isScience()
         
-            
-def checkHeader(filename):
-    """
-    Check header from OSN FITS files and return scale and instrument.
-    """
-    
-    hdulist = pyfits.open(filename)
-
-    # Check is a single HDU
-    if len(hdulist) >1:
-        logging.error("MEF files not supported")
-        raise Exception("MEF file not supported")
+        return (scale, ra, dec, instrument, is_science)
         
-    # Check some basic keywords
-    if 'INSTRUME' in hdulist[0].header:
-        instrument = hdulist[0].header['INSTRUME']
-    else:
-        instrument = None
-        
-    if 'NAXIS1' in hdulist[0].header:
-        naxis1 = hdulist[0].header['NAXIS1']
-    else:
-        naxis1 = -1
-        
-    if 'NAXIS2' in hdulist[0].header:
-        naxis2 = hdulist[0].header['NAXIS2']
-    else:
-        naxis2 = -1
-            
-    if 'XBINNING' in hdulist[0].header:
-        xbinning = hdulist[0].header['XBINNING']
-    else:
-        xbinning = -1
-            
-    if 'YBINNING' in hdulist[0].header:
-        ybinning = hdulist[0].header['XBINNING']
-    else:
-        ybinning = -1
-
-
-    #
-    # Coordinates
-    #
-    if 'RA' in hdulist[0].header:
-        ra = hdulist[0].header['RA']
-    elif 'OBJCTRA' in hdulist[0].header:
-        ra_str =  hdulist[0].header['OBJCTRA']
-    else:
-        ra = -1
-            
-    if 'YBINNING' in hdulist[0].header:
-        ybinning = hdulist[0].header['XBINNING']
-    else:
-        ybinning = -1
-
-    
-    if instrument=='Roper':
-        # pixel scale for Roper@T150 (eaest focus) is 0.23 arcsec/pixel
-        scale = 0.23 
-    elif instrument=='RoperT90':
-        # pixel scale for Roper@T90 is (west focus) 0.3857 arcsec/pixel
-        scale = 0.3857
-    else:
-        #default scale (?)
-        scale = 0.45
-    
-    pix_scale_x = scale * xbinning
-    pix_scale_y = scale * ybinning
-    
-    
-    #==========================================================================
-    # try:
-    #    checkWCS(hdulist[0].header)
-    # except Exception,e:
-    #    raise e
-    #==========================================================================
-    
-    hdulist.close()
-    
-    return pix_scale_x
-        
-def loadWCS(filename):
-    """
-    Load WCS from input image
-    """
-    
-    # Load the FITS hdulist using pyfits
-    hdulist = pyfits.open(fileaname)
-
-    # Parse the WCS keywords in the primary HDU
-    wcs = pywcs.WCS(hdulist[0].header)
-
-    # Print out the "name" of the WCS, as defined in the FITS header
-    print wcs.wcs.name
-
-    # Print out all of the settings that were parsed from the header
-    wcs.wcs.print_contents()
 
 
 def initWCS( input_image, pixel_scale):
@@ -316,10 +233,19 @@ def checkWCS( header ):
                 
 
     
-def solveField(filename, pix_scale, tmp_dir):
+def solveField(filename, tmp_dir, pix_scale=None):
     """
     Do astrometric calibration to the given filename using Astrometry.net 
     function 'solve-field'
+    
+    Parameters
+    ----------
+    
+    pix_scale: float
+        Default pixel scale to use in case it cannot be find out from header
+    
+    tmp_dir: str
+        Directory where output files are saved
     """
     
     #
@@ -331,9 +257,16 @@ def solveField(filename, pix_scale, tmp_dir):
     #
     # Read header parameters
     #    
-    (scale, ra, dec, instrument) = readHeader(filename)
-    
-    ## Create log file
+    (scale, ra, dec, instrument, is_science) = readHeader(filename)
+
+    # Whether no scale was found out and some was given as default, we use it
+    if scale==-1 and pix_scale!=None:
+        scale = pix_scale
+        
+    if not is_science:
+        log.info("Frame %s is not a science frame"%filename)
+        return 1
+        
     logging.debug("Starting to solve-field for: %s  Scale=%s  RA= %s Dec= %s \
     INSTRUMENT= %s"%(filename, scale, ra , dec, instrument))
     
@@ -346,8 +279,10 @@ def solveField(filename, pix_scale, tmp_dir):
     # 1) RA, Dec and Scale are known
     if ra!=-1 and dec!=-1 and scale!=-1:
         log.debug("RA, Dec and Scale are known")
+        # To avoid problems with wrong RA,Dec coordinates guessed, a wide 
+        # radius is used (0.5 degrees)
         str_cmd = "%s/solve-field -O -p --scale-units arcsecperpix --scale-low %s \
-        --scale-high %s --ra %s --dec %s --radius 0.1 -D %s %s\
+        --scale-high %s --ra %s --dec %s --radius 0.5 -D %s %s\
         "%(path_astrometry, scale-0.05, scale+0.05, ra, dec, tmp_dir, filename)
     # 2) RA, Dec are unknown but scale is
     elif ra==-1 or dec==-1:
@@ -368,7 +303,9 @@ def solveField(filename, pix_scale, tmp_dir):
                              stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              close_fds=True)
-    except Exception,e:
+    except Exception, e:
+        log.error("Some error while running subprocess: " + str_cmd)
+        log.error(str(e))
         raise e
 
     # Warning:
@@ -397,7 +334,15 @@ def solveField(filename, pix_scale, tmp_dir):
         log.error("Field was not solved.")
         raise Exception("Field was not solved")
             
-                    
+
+def runMultiSolver(files, tmp_dir, pix_scale=None):
+    """
+    Run a parallel proceesing to solve astrometry for the input files taking
+    advantege of multi-core CPUs
+    """
+    
+    
+                  
 ###############################################################################
 # main
 ###############################################################################
@@ -412,30 +357,20 @@ in principle previously reduced, but not mandatory.
 """
     parser = OptionParser(usage, description=desc)
     
-    parser.add_option("-c", "--config_file",
-                  action="store", dest="config_file", help="config file")
                   
     parser.add_option("-s", "--source",
                   action="store", dest="source_file",
                   help="Source file list of data frames. "
                   "It can be a file or directory name.")
     
-    parser.add_option("-o", "--output",
-                  action="store", dest="output_filename", 
-                  help="final coadded output image")
+    parser.add_option("-o", "--output_dir",
+                  action="store", dest="output_dir", default="/tmp",
+                  help="Place all output files in the specified directory [default=%default]")
     
     parser.add_option("-p", "--pixel_scale",
-                  action="store", dest="pixel_scale", type=float, default="0.45",
-                  help="Pixel scale of the image")
+                  action="store", dest="pixel_scale", type=float, 
+                  help="Pixel scale of the images")
     
-    parser.add_option("-H", "--flip_horizontally",
-                  action="store_true", dest="flipH", default=False,
-                  help="Flip Horizontally the image")
-
-    parser.add_option("-V", "--flip_vertically",
-                  action="store_true", dest="flipH", default=False,
-                  help="Flip Vertically the image")
-                  
                                 
     (options, args) = parser.parse_args()
     
@@ -446,6 +381,8 @@ in principle previously reduced, but not mandatory.
     logging.basicConfig(format = FORMAT, level = logging_level)
     logging.debug("Logging setup done !")
     
+    files_solved = []
+    files_not_solved = []
     
     # args is the leftover positional arguments after all options have been processed
     if not options.source_file  or len(args)!=0: 
@@ -466,13 +403,24 @@ in principle previously reduced, but not mandatory.
                         
         for file in filelist:
             try:
-                solveField(file, options.pixel_scale, "/tmp")
+                solveField(file, options.output_dir, options.pixel_scale)
+                files_solved.append(file)                
             except Exception,e:
+                files_not_solved.append(file)
                 logging.error("Error solving file %s  [%s] "%(file,str(e)))
                     
     else:
-        loggging.error("Source file %s does not exists",options.source_file)
+        logging.error("Source file %s does not exists",options.source_file)
         
+    print "\n"
+    print "No. files solved = ", len(files_solved)
+    print "------------------------"    
+    print files_solved
+    print "\n"
+    print "No. files not solved = ", len(files_not_solved)
+    print "------------------------"    
+    print files_not_solved
+    
     
     sys.exit()
         
