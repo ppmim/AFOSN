@@ -790,9 +790,9 @@ class ClFits (object):
                 self.pix_scale = 0.45 * self.binning
             elif self.instrument=='panic':
                 self.pix_scale = 0.45 * self.binning
-            elif self.instrument=='roper':
+            elif self.instrument=='roper':  # roperT150
                 self.pix_scale = 0.23 * self.binning
-            elif self.instrument=='roper90':
+            elif self.instrument=='ropert90':
                 self.pix_scale = 0.386 * self.binning
             elif self.instrument=='hawki':
                 self.pix_scale = 0.106 * self.binning

@@ -27,11 +27,12 @@ import sys
 import os
 import shutil
 import tempfile
-from optparse import OptionParser
 import fileinput
 import logging
 import subprocess
+import multiprocessing
 import glob
+from optparse import OptionParser
 
 import numpy
 import pywcs
@@ -46,10 +47,11 @@ import logging as log
 # - Contabilidad de ficheros resueltos y no  ---DONE
 # - Tiempo límite de resolución de un fichero --cpulimit (default to 300s)
 # - Opcion de añadir header wcs a la cabecera (image.new) 
-# - Multiprocessing
+# - Multiprocessing     --- DONE
 # - Estadísicas de errores de calibracion
 # - distorsion promedio (encontre un mail de Dustin donde hablaba de eso)
-# -
+# - limpiar de ficheros temporales/salida creados excepto el .wcs
+# - calibracion "fuerza bruta" 
 
 
 # Project modules
@@ -246,6 +248,11 @@ def solveField(filename, tmp_dir, pix_scale=None):
     
     tmp_dir: str
         Directory where output files are saved
+        
+    Returns
+    -------
+    Filename of solved file (filename.solved) 
+    
     """
     
     #
@@ -329,19 +336,62 @@ def solveField(filename, tmp_dir, pix_scale=None):
     #print "FILE=",solved_file
     if os.path.exists(solved_file):
         logging.info("Field solved !")
-        return 1
+        return filename
     else:
         log.error("Field was not solved.")
         raise Exception("Field was not solved")
             
 
+def calc(args):
+        """
+        Method used only to use with Pool.map_asycn() function
+        """
+        return solveField(*args)
+        
 def runMultiSolver(files, tmp_dir, pix_scale=None):
     """
     Run a parallel proceesing to solve astrometry for the input files taking
     advantege of multi-core CPUs
     """
+
+    # use all CPUs available in the computer
+    n_cpus = multiprocessing.cpu_count()
+    log.debug("N_CPUS :" + str(n_cpus))
+    pool = multiprocessing.Pool(processes=n_cpus)
     
+    results = []
+    solved = []
+    for file in files:
+        red_parameters = (file, tmp_dir, pix_scale)
+        try:
+            # Instead of pool.map() that blocks until
+            # the result is ready, we use pool.map_async()
+            results += [pool.map_async(calc, [red_parameters])]
+        except Exception,e:
+            log.error("Error processing file: " + file)
+            log.error(str(e))
+            
+    for result in results:
+        try:
+            result.wait()
+            # the 0 index is *ONLY* required if map_async is used !!!
+            solved.append(result.get()[0])
+        except Exception,e:
+            log.error("Cannot process file \n" + str(e))
+            
     
+    # Prevents any more tasks from being submitted to the pool. 
+    # Once all the tasks have been completed the worker 
+    # processes will exit.
+    pool.close()
+
+    # Wait for the worker processes to exit. One must call 
+    #close() or terminate() before using join().
+    pool.join()
+    
+    log.info("Finished parallel calibration")
+    
+    return solved
                   
 ###############################################################################
 # main
@@ -400,18 +450,28 @@ in principle previously reduced, but not mandatory.
                             for line in fileinput.input(options.source_file)]
         elif os.path.isdir(options.source_file):
             filelist = glob.glob(options.source_file+"/*.fit*")
-                        
+
+        # Parallel approach        
+        files_solved = runMultiSolver(filelist, options.output_dir, 
+                                      options.pixel_scale)
         for file in filelist:
-            try:
-                solveField(file, options.output_dir, options.pixel_scale)
-                files_solved.append(file)                
-            except Exception,e:
+            if file not in files_solved:
                 files_not_solved.append(file)
-                logging.error("Error solving file %s  [%s] "%(file,str(e)))
+        
+        # Serial approach
+                    
+        #for file in filelist:
+        #    try:
+        #        solveField(file, options.output_dir, options.pixel_scale)
+        #        files_solved.append(file)                
+        #    except Exception,e:
+        #        files_not_solved.append(file)
+        #        logging.error("Error solving file %s  [%s] "%(file,str(e)))
                     
     else:
         logging.error("Source file %s does not exists",options.source_file)
-        
+
+            
     print "\n"
     print "No. files solved = ", len(files_solved)
     print "------------------------"    
