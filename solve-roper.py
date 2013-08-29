@@ -39,6 +39,7 @@ import pywcs
 import pyfits
 import sys
 import logging as log
+import time
 
 
 # TODO
@@ -52,6 +53,7 @@ import logging as log
 # - distorsion promedio (encontre un mail de Dustin donde hablaba de eso)
 # - limpiar de ficheros temporales/salida creados excepto el .wcs
 # - calibracion "fuerza bruta" 
+# - log file
 
 
 # Project modules
@@ -425,10 +427,40 @@ in principle previously reduced, but not mandatory.
     (options, args) = parser.parse_args()
     
     
-    ## Logging setup
-    FORMAT =  "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    logging_level = logging.DEBUG
-    logging.basicConfig(format = FORMAT, level = logging_level)
+    # Logging setup
+    logging.basicConfig(level=logging.DEBUG,
+                        format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s',
+                        datefmt='%Y-%m-%d %H:%M:%S',
+                        filename='/tmp/field-solver.log',
+                        filemode='w')
+    # define a Handler which writes INFO messages or higher to the sys.stderr
+    console = logging.StreamHandler()
+    console.setLevel(logging.DEBUG)
+    # set a format which is simpler for console use
+    formatter = logging.Formatter('%(name)-12s: %(levelname)-8s %(message)s')
+    # tell the handler to use this format
+    console.setFormatter(formatter)
+    # add the handler to the root logger
+    logging.getLogger('').addHandler(console)
+
+
+    # logging = logging.getLogger('field-solver')
+    # logging.setLevel(logging.DEBUG)
+    # # create file handler which logs even debug messages
+    # fh = logging.FileHandler('field-solver.log')
+    # fh.setLevel(logging.DEBUG)
+    # # create console handler with a higher log level
+    # ch = logging.StreamHandler()
+    # ch.setLevel(logging.DEBUG)
+    # # create formatter and add it to the handlers
+    # FORMAT =  "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    # formatter = logging.Formatter(FORMAT)
+    # ch.setFormatter(formatter)
+    # fh.setFormatter(formatter)
+    # # add the handlers to logger
+    # logging.addHandler(ch)
+    # logging.addHandler(fh)
+
     logging.debug("Logging setup done !")
     
     files_solved = []
@@ -440,6 +472,7 @@ in principle previously reduced, but not mandatory.
         parser.error("incorrect number of arguments " )
     
     # Check if source_file is a FITS file or a text file listing a set of files
+    tic = time.clock()
     if os.path.exists(options.source_file):
         if os.path.isfile(options.source_file):
             try:
@@ -471,17 +504,24 @@ in principle previously reduced, but not mandatory.
     else:
         logging.error("Source file %s does not exists",options.source_file)
 
-            
-    print "\n"
-    print "No. files solved = ", len(files_solved)
-    print "------------------------"    
-    print files_solved
-    print "\n"
-    print "No. files not solved = ", len(files_not_solved)
-    print "------------------------"    
-    print files_not_solved
+    toc = time.clock()
+
+    # print "\n"
+    # print "No. files solved = ", len(files_solved)
+    # print "------------------------"    
+    # print files_solved
+    # print "\n"
+    # print "No. files not solved = ", len(files_not_solved)
+    # print "------------------------"    
+    # print files_not_solved
     
-    
+    log.info("No. files solved = %s"%len(files_solved))
+    log.info("----------------")
+    log.info(files_solved)
+    log.info("No. files NOT solved = %s", len(files_not_solved))
+    log.info("--------------------")
+    log.info(files_not_solved)
+    log.info("Time : %s"%(toc-tic))
     sys.exit()
         
     
