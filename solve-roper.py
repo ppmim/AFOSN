@@ -274,11 +274,12 @@ def solveField(filename, tmp_dir, pix_scale=None):
         
     if not is_science:
         log.info("Frame %s is not a science frame"%filename)
-        return 1
+        return filename + ".not_science"
         
     logging.debug("Starting to solve-field for: %s  Scale=%s  RA= %s Dec= %s \
     INSTRUMENT= %s"%(filename, scale, ra , dec, instrument))
     
+    # Hardcoded the path !
     path_astrometry = "/usr/local/astrometry/bin"  
 
     #
@@ -427,6 +428,10 @@ in principle previously reduced, but not mandatory.
     parser.add_option("-p", "--pixel_scale",
                   action="store", dest="pixel_scale", type=float, 
                   help="Pixel scale of the images")
+                  
+    parser.add_option("-r", "--recursive",
+                  action="store_true", dest="recursive", default=False,
+                  help="Recursive subdirectories (only first level)")
     
                                 
     (options, args) = parser.parse_args()
@@ -488,12 +493,17 @@ in principle previously reduced, but not mandatory.
                             for line in fileinput.input(options.source_file)]
         elif os.path.isdir(options.source_file):
             filelist = glob.glob(options.source_file+"/*.fit*")
-
+            # Look for subdirectories
+            if options.recursive:
+                subdirectories = [ name for name in os.listdir(options.source_file) if os.path.isdir(os.path.join(options.source_file, name)) ]
+                for subdir in subdirectories:
+                    filelist+= glob.glob(os.path.join(options.source_file, subdir)+"/*.fit*")
+                
         # Parallel approach        
         files_solved = runMultiSolver(filelist, options.output_dir, 
                                       options.pixel_scale)
         for file in filelist:
-            if file not in files_solved:
+            if file not in files_solved and file+".not_science" not in files_solved:
                 files_not_solved.append(file)
         
         # Serial approach
@@ -520,7 +530,9 @@ in principle previously reduced, but not mandatory.
     # print "------------------------"    
     # print files_not_solved
     
-    log.info("No. files solved = %s"%len(files_solved))
+    log.info("No. files = %s"%len(filelist))
+    # calibracion files (bias, dark, flats, ...) are considered as solved files
+    log.info("No. files solved = %s"%(len(filelist)-len(files_not_solved)))
     log.info("----------------")
     log.info(files_solved)
     log.info("No. files NOT solved = %s", len(files_not_solved))

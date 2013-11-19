@@ -601,7 +601,7 @@ class ClFits (object):
             # WCS-coordinates are preferred than RA,DEC (both in degrees)
             if ('CTYPE1' in myfits[0].header and
                      (myfits[0].header['CTYPE1']=='RA---TAN' or
-                      myfits[0].header['CTYPE1']=='RA---TAN--SIP')):
+                      myfits[0].header['CTYPE1']=='RA---TAN--SIP') and 0):
                 wcs = wcsutil.WCS(myfits[0].header)
                 self._ra, self._dec = wcs.image2sky( self.naxis1/2, self.naxis2/2, True)
                 log.debug("Read RA-WCS coordinate =%s", self._ra)
@@ -626,7 +626,7 @@ class ClFits (object):
             # WCS-coordinates are preferred than RA,DEC
             if ('CTYPE2' in myfits[0].header and
                      (myfits[0].header['CTYPE2']=='DEC--TAN' or
-                      myfits[0].header['CTYPE2']=='DEC--TAN--SIP') ):
+                      myfits[0].header['CTYPE2']=='DEC--TAN--SIP') and 0):
                 wcs = wcsutil.WCS(myfits[0].header)
                 self._ra, self._dec = wcs.image2sky( self.naxis1/2, self.naxis2/2, True)
                 log.debug("Read Dec-WCS coordinate =%s", self._dec)
