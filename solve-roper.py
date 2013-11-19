@@ -290,8 +290,9 @@ def solveField(filename, tmp_dir, pix_scale=None):
         log.debug("RA, Dec and Scale are known")
         # To avoid problems with wrong RA,Dec coordinates guessed, a wide 
         # radius is used (0.5 degrees)
+        # Although --downsample is used, scale does not need to be modified
         str_cmd = "%s/solve-field -O -p --scale-units arcsecperpix --scale-low %s \
-        --scale-high %s --ra %s --dec %s --radius 0.5 -D %s %s\
+        --scale-high %s --ra %s --dec %s --radius 0.5 -D %s %s --downsample 2\
         "%(path_astrometry, scale-0.05, scale+0.05, ra, dec, tmp_dir, filename)
     # 2) RA, Dec are unknown but scale is
     elif ra==-1 or dec==-1:
@@ -382,6 +383,10 @@ def runMultiSolver(files, tmp_dir, pix_scale=None):
             log.error("Cannot process file \n" + str(e))
             
     
+    # Here we could try again to solve fields that were not solved but
+    # using other parameters or index files
+
+
     # Prevents any more tasks from being submitted to the pool. 
     # Once all the tasks have been completed the worker 
     # processes will exit.
@@ -472,7 +477,7 @@ in principle previously reduced, but not mandatory.
         parser.error("incorrect number of arguments " )
     
     # Check if source_file is a FITS file or a text file listing a set of files
-    tic = time.clock()
+    tic = time.time()
     if os.path.exists(options.source_file):
         if os.path.isfile(options.source_file):
             try:
@@ -504,7 +509,7 @@ in principle previously reduced, but not mandatory.
     else:
         logging.error("Source file %s does not exists",options.source_file)
 
-    toc = time.clock()
+    toc = time.time()
 
     # print "\n"
     # print "No. files solved = ", len(files_solved)
