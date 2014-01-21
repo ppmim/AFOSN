@@ -938,6 +938,7 @@ def fits_simple_verify(fitsfile):
     f = open(fitsfile,"readonly")
         
     FITS_BLOCK_SIZE = 2880
+    
     try:
         # check first card name
         card = f.read(len("SIMPLE"))
