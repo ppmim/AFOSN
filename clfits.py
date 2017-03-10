@@ -1,35 +1,52 @@
+#! /usr/bin/env python
+#encoding:UTF-8
+
+# Copyright (c) 2008-2015 Jose M. Ibanez All rights reserved.
+# Institute of Astrophysics of Andalusia, IAA-CSIC
 #
-# PANICtool
+# This file is part of PAPI
 #
-# DataClassifier.py
+# PAPI is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+##############################################################################
+#
+# clfits.py
 #
 # Created    : 07/04/2008    jmiguel@iaa.es
 # Update     : 25/05/2009    jmiguel@iaa.es   Added object field
 #              14/12/2009    jmiguel@iaa.es   Renamed SKY_FLAT by TW_FLAT
 #                                             Reanamed isSkyFlat() by isTwFlat()
 #              02/03/2010    jmiguel@iaa.es   Added READMODE checking
-#              20/08/2013    jmiguel@iaa.es   Addapted to support OSN CCDs 
+#              20/08/2013    jmiguel@iaa.es   Addapted to support OSN CCDs. 
 #
 ###############################################################################
 
 """
-   Class for FITS data classifying
+Module containing all basic operation with FITS files.
 """
 
 # import external modules
 
 
 import os.path
-import pyfits
 import sys
 import time
-
-import pywcs 
-import numpy
-
 from time import strftime
 
-import misc.wcsutil as wcsutil
+from astropy import wcs
+import astropy.io.fits as fits
+from misc.check_open import check_open
 
 # Logging (PAPI or Python built-in)
 try:
@@ -37,6 +54,10 @@ try:
     from misc.paLog import log
 except ImportError:
     import logging as log
+
+
+import warnings
+
 
 ###############################################################################
 class FitsTypeError(ValueError):
@@ -49,8 +70,8 @@ class ClFits (object):
 
     """
       Represents a Classified FITS of PANIC
-      A class for PANIC FITS file classification and recognition. Actually it is a
-      wrapper for pyfits.
+      A class for PANIC FITS file classification and recognition. Actually it is 
+      a wrapper for astropy.io.fits.
 
       TYPE of files to be considered :
          UNKNOW,
@@ -73,7 +94,7 @@ class ClFits (object):
     """
 
     # Class initialization
-    def __init__(self, full_pathname, *a,**k):
+    def __init__(self, full_pathname, check_integrity=True, *a,**k):
       
         """
         Init the object
@@ -81,11 +102,16 @@ class ClFits (object):
         Parameters
         ----------
         full_pathname: str
-            pathname The full filename of the fits file to classify
+            pathname The full filename of the fits file to classify.
+        
+        check_integrity: bool
+            When True, the FITS integrity is done to check the file is complete.
+            Mainly used on QL the know whether file writting finished. 
         """
         
         super (ClFits, self).__init__ (*a,**k)
       
+        self.check_integrity = check_integrity
         self.pathname = full_pathname # path_name + root_name
         self.filename = os.path.basename(self.pathname)  # root_name
         self.type = "UNKNOWN"
@@ -112,7 +138,6 @@ class ClFits (object):
 
         self.instrument = ""
         self.processed = False
-        self.exptime = -1
         self.filter = ""
         self.mef = False
         self.next = 0
@@ -129,9 +154,16 @@ class ClFits (object):
 
         self.object = ""
         self.chipcode = 1
-        self.ncoadds = -1
+        self.exptime = -1
         self.itime = 0.0
+        self.ncoadds = -1
+        self.nexp = -1 # number cycle repeat count
+        # if nexp == ncoadd, then saving mode is integrated,
+        # otherwise, it is a cube (non-integrated)
+        
         self.readmode = ""
+        
+        # pointer to the primary-main header
         self.my_header = None
         self.obs_tool = False
         self.pix_scale = 1.0
@@ -195,7 +227,7 @@ class ClFits (object):
                 or self.type=="TW_FLAT" or self.type=="SKY_FLAT")
     
     def isFocusSerie(self):
-        return False # not yet implemented
+        return (self.type=="FOCUS") 
     
     def isScience(self):
         return (self.type.count("SCIENCE") or self.type.count("STD"))
@@ -224,6 +256,9 @@ class ClFits (object):
     
     def isMEF(self):
         return (self.mef)
+
+    def getNExt(self):
+        return (self.next)
     
     def isFromOT(self):
         return (self.obs_tool)
@@ -234,6 +269,13 @@ class ClFits (object):
         else:
             return False
     
+    def isFromPANIC(self):
+        return self.instrument=='panic'
+
+    def isPANICFullFrame(self):
+        # Raw PANIC full frame
+        return (self.instrument=='panic' and self.naxis1==4096 and self.naxis2==4096)
+                
     def expTime(self):
         return (self.exptime)
     
@@ -251,7 +293,7 @@ class ClFits (object):
     
     @property
     def pixScale(self):
-        return pix_scale
+        return self.pix_scale
 
     @property
     def Telescope(self):
@@ -295,7 +337,7 @@ class ClFits (object):
             log.error("Wrong extension number especified. Not a MEF file.")
         else:
             try:
-                myfits = pyfits.open(self.pathname, 
+                myfits = fits.open(self.pathname, 
                                      ignore_missing_end=True) # since some problems with O2k files   
                 temp = myfits[0].data
                 myfits.close(output_verify='ignore')
@@ -307,49 +349,83 @@ class ClFits (object):
 
     def recognize(self, retries=5):
      
-        ###log.info("Recognizing file %s" %self.filename)
+        #log.info("Recognizing file %s" %self.filename)
 
         # Check the file exists
         if not os.path.exists( self.pathname ):
             log.error('Cannot find frame : "%s"' % self.pathname)
             raise Exception("File %s not found"%self.pathname)
         
-        # check FITS-file integrity
+        # Read FITS and check FITS-file integrity
         nTry = 0
-        while True:
-            try:
-                fits_simple_verify(self.pathname)
-            except Exception,e:
-                if nTry<retries:
-                    nTry +=1
-                    time.sleep(nTry*0.5)
-                    log.warning("Trying to re-read integrity of FITS-file : %s\n %s"%(self.pathname, str(e)))
-                else:
-                    log.error("Could not read with integrity FITS-file:  %s\n %s"%(self.pathname, str(e)))
-                    log.error("File discarded : %s"%self.pathname)
-                    raise e
-            else:
-                break
-              
-        # Open the file for header recognition            
-        try:
-            myfits = pyfits.open(self.pathname, 
-                                 ignore_missing_end=True) # since some problems with O2k files                               
-            
-            #if len(myfits)==0 or 'SIMPLE' not in myfits[0].header or myfits[0].header['SIMPLE']!=True:
-            #    raise ValueError('Found a not compliant FITS file.')
+        found_size = 0
 
-            #myfits = pyfits.open(self.pathname, 'update')
-            #myfits[0].verify()
-        except Exception,e:
-            log.error("Could not open frame %s. Error in file : %s"%(self.pathname, str(e)))
-            raise e
-        
-        #Check if is a MEF file 
-        if len(myfits)>1:
+        if self.check_integrity:
+            # First, check if the file has the right extension (.fit, .fits)
+            if not ( self.pathname.endswith('.fits') or 
+                    self.pathname.endswith('.fit') ):
+                msg = "%s does not seem a FITS file (.fits, .fit)" % self.pathname
+                log.error(msg)
+                raise Exception(msg)
+                
+            # Secondly, we check if file is still being saved, ie., still 
+            # open by some GEIRS's process
+            if check_open(self.pathname, "geirs_save"):
+                # File is still open by 'save' process of GEIRS 
+                raise IOError("Error, file %s still being saved"%self.pathname)
+
+            # We change that behavior of fits warnings with a filter.
+            # See http://bit.ly/1etvfJC
+            # It is very useful because some fits warnings are quite usual
+            # when reading non completely written files. Non captured warnings 
+            # slow down the reading process.
+            # Ex. 
+            #    "Header block contains null bytes instead of spaces for padding, and is not 
+            #     FITS-compliant. Nulls may be replaced with spaces upon writing."
+            # 
+            #log.debug("Cheking FITS integrity")
+            # Turn matching warnings into exceptions
+
+            warnings.simplefilter('error', UserWarning)
+            while True:
+                #log.debug("FITS integrity check. FILE=%s ITER=%d"%(self.pathname,nTry))
+                try:
+                    # First level of checking
+                    #found_size = fits_simple_verify(self.pathname)
+                    
+                    # Now, try to read the whole FITS file
+                    # Note: memmmap allows the array data of each HDU to be 
+                    # accessed with mmap, rather than being read into memory all
+                    # at once. This is particularly useful for working with very 
+                    # large arrays that cannot fit entirely into physical memory. 
+                    # memmap=True is the default value as of PyFITS v3.1.0.
+                    myfits = fits.open(self.pathname, mode='readonly', memmap=True,
+                                     ignore_missing_end=False) # since some problems with O2k files 
+                except Exception, e:
+                    log.warning("Error reading FITS : %s" % self.pathname)
+                    if nTry < retries:
+                        nTry +=1
+                        time.sleep(nTry * 0.5)
+                        log.warning("Error reading FITS. Trying to read again file : %s\n %s"%(self.pathname, str(e)))
+                    else:
+                        log.error("Finally, FITS-file could not be read with data integrity:  %s\n %s" % (self.pathname, str(e)))
+                        log.error("File discarded : %s" % self.pathname)
+                        raise e
+                else:
+                    break
+
+            # Undo the warning filter to avoid Exceptions forever even when 
+            # non-hard warnings!
+            warnings.resetwarnings()
+        else:
+            myfits = fits.open(self.pathname, 
+                                     ignore_missing_end=False)     
+
+        # Check if is a MEF file 
+        if len(myfits) > 1:
             self.mef = True
             self.next = len(myfits)-1
-            log.debug("Found a MEF file with %d extensions", self.next)
+            ###log.debug("Found a MEF file with %d extensions", self.next)
         else:
             self.mef = False
             self.next = 1
@@ -357,13 +433,13 @@ class ClFits (object):
         
         # If file is a MEF, some values will be read from the header extensions      
         if self.mef:
-            # we suppose all extension have the same dimensions
+            # we suppose all extension have the same dimensions (subwindows ???)
             self.naxis1 = myfits[1].header['NAXIS1']
             self.naxis2 = myfits[1].header['NAXIS2']
             #self._shape = myfits[1].data.shape # (naxis3, naxis2, naxis1)
-            #Because the pyfits.data.shape makes extremealy slow read
-            #of the FITS-file (mainly because shape need to read the whole image),
-            #we build a shape tuple from the header values (NAXIS1, NAXIS2, and NAXIS3 )
+            # Because the fits.data.shape makes extremealy slow read
+            # of the FITS-file (mainly because shape need to read the whole image),
+            # we build a shape tuple from the header values (NAXIS1, NAXIS2, and NAXIS3 )
             if 'NAXIS3' in myfits[1].header:
                 self._shape = (myfits[1].header['NAXIS3'], self.naxis2, self.naxis1)
             else:
@@ -372,7 +448,7 @@ class ClFits (object):
             self.naxis1 = myfits[0].header['NAXIS1']
             self.naxis2 = myfits[0].header['NAXIS2']
             #self._shape = myfits[0].data.shape # (naxis2, naxis1)
-            #see comments about pyfits.data.shape above 
+            #see comments about fits.data.shape above 
             if 'NAXIS3' in myfits[0].header:
                 self._shape = (myfits[0].header['NAXIS3'], self.naxis2, self.naxis1)
             else:
@@ -410,11 +486,20 @@ class ClFits (object):
         
         # IMAGE TYPE
         try:
-            if self.instrument=='omega2000' and 'OBJECT' in myfits[0].header:
+            if self.instrument=='omega2000' and 'PAPITYPE' in myfits[0].header:
+                keyword_with_frame_type = 'PAPITYPE'
+                # It happens if the image is product of PAPI 
+            elif self.instrument=='omega2000' and 'IMAGETYP' in myfits[0].header:
+                keyword_with_frame_type = 'IMAGETYP'
+            elif self.instrument=='omega2000' and 'OBJECT' in myfits[0].header:
                 keyword_with_frame_type = 'OBJECT'
             elif self.instrument=='hawki' and 'IMAGETYP' in myfits[0].header:
                 keyword_with_frame_type = 'IMAGETYP'
             elif self.instrument=='hawki' and 'OBJECT' in myfits[0].header:
+                keyword_with_frame_type = 'OBJECT'
+            elif self.instrument=='omegacass_mpia' and 'IMAGETYP' in myfits[0].header:
+                keyword_with_frame_type = 'IMAGETYP'    
+            elif self.instrument=='omegacass_mpia' and 'OBJECT' in myfits[0].header:
                 keyword_with_frame_type = 'OBJECT'
             elif self.instrument=='panic': # current ID in GEIRS for PANIC
                 if self.obs_tool:
@@ -454,21 +539,31 @@ class ClFits (object):
                         self.type = "TW_FLAT_DUSK"
                     elif ltype.count('dawn'):
                         self.type = "TW_FLAT_DAWN"
-                    elif ltype.count('sky_flat') or ltype.count('flat'): 
+                    elif ltype.count('sky_flat'): 
                         self.type = "SKY_FLAT"
+                    elif ltype.count('flat'):
+                        self.type = "DOME_FLAT"
                     elif ltype.count('sky'):
                         self.type = "SKY"
+                    elif ltype.count('focus'):
+                        self.type = "FOCUS"
                     elif ltype.count('object'):
                         self.type = "SCIENCE"
                     else:
-                        #By default, the image is classified as SCIENCE object
+                        # By default, the image is classified as SCIENCE object
                         self.type = "SCIENCE"
             except KeyError:
-                log.error('PAPITYPE/OBJECT/IMAGETYP keyword not found')
+                log.warning('PAPITYPE/OBJECT/IMAGETYP keyword not found')
                 self.type = 'UNKNOW'
         elif self.instrument=='hawki':
             try:
-                if myfits[0].header[keyword_with_frame_type].lower().count('dark') :
+                # Self-typed file, created by PAPI (master calibrations)
+                if 'PAPITYPE' in myfits[0].header:
+                    self.type = myfits[0].header['PAPITYPE']
+                # rest of raw images
+                elif myfits[0].header[keyword_with_frame_type].lower().count('master'):
+                    self.type = myfits[0].header[keyword_with_frame_type]
+                elif myfits[0].header[keyword_with_frame_type].lower().count('dark'):
                     self.type = "DARK"
                 elif myfits[0].header[keyword_with_frame_type].lower().count('lamp off'):
                     self.type = "DOME_FLAT_LAMP_OFF"
@@ -489,14 +584,19 @@ class ClFits (object):
                     #By default, the image is classified as SCIENCE object
                     self.type = "SCIENCE"
             except KeyError:
-                log.error('PAPITYPE/OBJECT/IMAGETYP keyword not found')
+                log.warning('PAPITYPE/OBJECT/IMAGETYP keyword not found')
                 self.type = 'UNKNOW'
                 
-        else: #o2000, Roper or  ??
+        else: #o2000, Omegacass, Roper, etc
             try:
-                if myfits[0].header[keyword_with_frame_type].lower().count('bias') :
+                # Self-typed file, created by PAPI (master calibrations)
+                if 'PAPITYPE' in myfits[0].header:
+                    self.type = myfits[0].header['PAPITYPE']
+                elif myfits[0].header[keyword_with_frame_type].lower().count('master'):
+                    self.type = myfits[0].header[keyword_with_frame_type]
+                elif myfits[0].header[keyword_with_frame_type].lower().count('bias'):
                     self.type = "BIAS"
-                elif myfits[0].header[keyword_with_frame_type].lower().count('dark') :
+                elif myfits[0].header[keyword_with_frame_type].lower().count('dark'):
                     self.type = "DARK"
                 elif myfits[0].header[keyword_with_frame_type].lower().count('lamp off'):
                     self.type = "DOME_FLAT_LAMP_OFF"
@@ -510,11 +610,9 @@ class ClFits (object):
                      myfits[0].header[keyword_with_frame_type].lower().count('flat'): 
                     self.type = "SKY_FLAT"
                 elif myfits[0].header[keyword_with_frame_type].lower().count('sky'):
-                    self.type = "SKY"
+                    self.type = "SCIENCE" #"SKY" # because we cannot group correctly; however it will be correctly detected in skyfilter
                 elif myfits[0].header[keyword_with_frame_type].lower().count('focus'):
-                    self.type = "SCIENCE"  
-                    #por una razon que desconozco, CAHA le asigna el id 'focus' en algunas images, 
-                    #pero tiene pinta que fue  un despiste del operador !!!
+                    self.type = "FOCUS"  
                 elif myfits[0].header[keyword_with_frame_type].lower().count('science'):
                     self.type = "SCIENCE"
                 # CCD Roper (OSN)
@@ -525,43 +623,48 @@ class ClFits (object):
                     self.type = "SCIENCE"
                     #log.debug("DEFAULT Image type: %s"%self.type)
             except KeyError:
-                log.error('PAPITYPE/OBJECT/IMAGETYP keyword not found')
+                log.warning('PAPITYPE/OBJECT/IMAGETYP keyword not found')
                 self.type = 'UNKNOW'
         
-        #Is pre-reduced the image ? by default, isn't
+        # Is pre-reduced the image ? by default, isn't
         self.processed = False
         
-        #print "File :"+ self.pathname
-        #FILTER
+        # FILTER
         try:
             if self.instrument=='hawki':
-                if 'ESO INS FILT1 NAME' in myfits[0].header: 
-                    self.filter = myfits[0].header['ESO INS FILT1 NAME']
+                if 'HIERARCH ESO INS FILT1 NAME' in myfits[0].header: 
+                    self.filter = myfits[0].header['HIERARCH ESO INS FILT1 NAME']
+                elif 'HIERARCH ESO INS FILT2 NAME' in myfits[0].header: 
+                    self.filter = myfits[0].header['HIERARCH ESO INS FILT2 NAME']
                 elif 'FILTER1' in myfits[0].header:
                     self.filter = myfits[0].header['FILTER1']
                 elif 'FILTER2' in myfits[0].header:
                     self.filter = myfits[0].header['FILTER2']
+                else:
+                    log.warning("Cannot find out FILTER")
+                    self.filter = 'UNKNOWN'
             else: # PANIC, O2000, Roper, ...
                 self.filter  = myfits[0].header['FILTER']
         except KeyError:
-            log.warning('FILTER keyword not found')
+            log.warning('Cannot find out FILTER')
             self.filter  = 'UNKNOWN'
         
-        #Exposition Time
+        # Exposition Time
         try:
-            self.exptime=myfits[0].header['EXPTIME']
+            self.exptime = myfits[0].header['EXPTIME']
         except KeyError:
             log.warning('EXPTIME keyword not found')
             self.exptime  = -1
 
-        #Integration Time
+        # Integration Time
         try:
             self.itime = myfits[0].header['ITIME']
         except KeyError:
-            log.warning('ITIME keyword not found')
+            if self.instrument=='panic':
+                log.warning('ITIME keyword not found')
             self.itime  = -1
             
-        #Number of coadds
+        # Number of coadds
         try:
             if 'NCOADDS' in myfits[0].header:
                 self.ncoadds = myfits[0].header['NCOADDS']
@@ -574,15 +677,29 @@ class ClFits (object):
         except KeyError:
             log.warning('NCOADDS keyword not found. Taken default value (=1)')
             self.ncoadds  = 1
-                 
-        #Read-Mode
+        
+        # Number of expositions (cycle repeat count) - only PANIC/O2k
         try:
-            self.readmode = myfits[0].header['READMODE']
+            if 'NEXP' in myfits[0].header:
+                self.nexp = myfits[0].header['NEXP']
+            else:
+                self.nexp = 1
+        except KeyError:
+            log.warning('NEXP keyword not found. Taken default value (=1)')
+            self.nexp  = 1
+            
+            
+        # Read-Mode
+        try:
+            if self.instrument == 'panic':
+                self.readmode = myfits[0].header['READMODE']
+            elif self.instrument == 'hawki':
+                self.readmode = myfits[0].header['HIERARCH ESO DET NCORRS NAME']
         except KeyError:
             log.warning('READMODE keyword not found')
             self.readmode  = ""
                      
-        #UT-date of observation
+        # UT-date of observation
         try:
             self.datetime_obs = myfits[0].header['DATE-OBS']
             if self.datetime_obs.count('T'):
@@ -596,15 +713,27 @@ class ClFits (object):
             self.time_obs  = ''
             self.datetime_obs = ''
         
-        #RA-coordinate (in degrees)
+        # ############################
+        # RA-coordinate (in degrees)
+        # ############################
         try:
+            # Due to a bad initial astrometric (WCS) at PANIC, we 
+            # read/use 'raw' coordinates
+            if 'roper' in self.instrument:
+                a = myfits[0].header['OBJCTRA']
+                self._ra = float(a.split()[0]) + float(a.split()[1])/60.0 + float(a.split()[2])/3600.0
+                # convert to degrees                
+                self._ra = self._ra * 360.0 / 24.0
+                
             # WCS-coordinates are preferred than RA,DEC (both in degrees)
-            if ('CTYPE1' in myfits[0].header and
-                     (myfits[0].header['CTYPE1']=='RA---TAN' or
-                      myfits[0].header['CTYPE1']=='RA---TAN--SIP') and 0):
-                wcs = wcsutil.WCS(myfits[0].header)
-                self._ra, self._dec = wcs.image2sky( self.naxis1/2, self.naxis2/2, True)
-                log.debug("Read RA-WCS coordinate =%s", self._ra)
+            elif ('CTYPE1' in myfits[0].header and
+                     'TAN' in myfits[0].header['CTYPE1'] ): #'RA---TAN' or 'RA---TAN--SIP'
+                m_wcs = wcs.WCS(myfits[0].header)
+                #self._ra, self._dec = wcs.image2sky( self.naxis1/2, self.naxis2/2, True)
+                # No SIP or Paper IV table lookup distortion correction is applied.
+                # Take as reference the coordinates of the center of the detector
+                self._ra = m_wcs.wcs_pix2world([[self.naxis1/2, self.naxis2/2]], 1)[0][0]
+                #log.debug("Read RA-WCS coordinate =%s", self._ra)
             elif 'RA' in myfits[0].header:
                 self._ra = myfits[0].header['RA'] # degrees supposed
             elif 'OBJCTRA' in myfits[0].header:
@@ -616,20 +745,35 @@ class ClFits (object):
             else:
                 raise Exception("No valid RA coordinate found")
         except Exception,e:
-            log.error('Error reading RA keyword :%s',str(e))
+            log.warning('Error reading RA keyword :%s',str(e))
             self._ra  = -1
         finally:
-            log.debug("RA = %s"%str(self._ra))
+            #log.debug("RA = %s"%str(self._ra))
+            pass
 
-        #Dec-coordinate (in degrees)
+        # ############################
+        # Dec-coordinate (in degrees)
+        # ############################
         try:
+            # Due to a bad initial astrometric (WCS) at PANIC, we 
+            # read/use 'raw' coordinates
+            if 'roper' in self.instrument:
+                a = myfits[0].header['OBJCTDEC']
+                if a.split()[0][0]=='-':
+                    self._dec = (-1.0) * float(a.split()[0]) + float(a.split()[1])/60.0 + float(a.split()[2])/3600.0
+                    self._dec*=-1.0
+                else:
+                    self._dec =  float(a.split()[0]) + float(a.split()[1])/60.0 + float(a.split()[2])/3600.0
+            
             # WCS-coordinates are preferred than RA,DEC
-            if ('CTYPE2' in myfits[0].header and
-                     (myfits[0].header['CTYPE2']=='DEC--TAN' or
-                      myfits[0].header['CTYPE2']=='DEC--TAN--SIP') and 0):
-                wcs = wcsutil.WCS(myfits[0].header)
-                self._ra, self._dec = wcs.image2sky( self.naxis1/2, self.naxis2/2, True)
-                log.debug("Read Dec-WCS coordinate =%s", self._dec)
+            elif ('CTYPE2' in myfits[0].header and
+                     'TAN' in myfits[0].header['CTYPE2']): #=='DEC--TAN' or 'DEC--TAN--SIP'
+                m_wcs = wcs.WCS(myfits[0].header)
+                #self._ra, self._dec = wcs.image2sky( self.naxis1/2, self.naxis2/2, True)
+                # No SIP or Paper IV table lookup distortion correction is applied.
+                self._dec = m_wcs.wcs_pix2world([[self.naxis1/2, self.naxis2/2]], 1)[0][1]
+                        
+                #log.debug("Read Dec-WCS coordinate =%s", self._dec)
             elif 'DEC' in myfits[0].header:
                 self._dec = myfits[0].header['DEC']
             elif 'OBJCTDEC' in myfits[0].header:
@@ -642,54 +786,57 @@ class ClFits (object):
             else:
                 raise Exception("No valid DEC coordinates found")
         except Exception,e:
-            log.error('Error reading DEC keyword : %s', str(e))
+            log.warning('Error reading DEC keyword : %s', str(e))
             self._dec  = -1
         finally:
-            log.debug("DEC = %s"%str(self._dec))
-    
+            #log.debug("DEC = %s"%str(self._dec))
+            pass
+
+        # EQUINOX
         try:
             self.equinox = myfits[0].header['EQUINOX']
         except KeyError:
-            log.warning("EQUINOX keyword not found")
+            #log.debug("EQUINOX keyword not found")
             self.equinox = -1
             
-        #MJD-Modified julian date 'days' of observation
+        # MJD-Modified julian date 'days' of observation
         try:
             self.mjd = myfits[0].header['MJD-OBS']
         except KeyError:
             log.warning('MJD-OBS keyword not found')
             self.mjd  = -1
            
-        #OBJECT
+        # OBJECT
         try:
             self.object = myfits[0].header['OBJECT']
         except KeyError:
             log.warning('OBJECT keyword not found')
             self.object  = ''   
         
-        #CHIPCODE
+        # CHIPCODE
         try:
             self.chipcode = myfits[0].header['CHIPCODE']
         except KeyError:
-            ###log.warning('CHIPCODE keyword not found, setting default (1)')
             self.chipcode  = 1  # default
         
-        #DetectorID
+        # DetectorID
         try:
-            if self.instrument=='hawki': 
-                self.detectorID=myfits[0].header['HIERARCH ESO DET CHIP NAME']
-            else: 
-                self.detectorID='O2k'
+            if self.instrument=='hawki' and 'HIERARCH ESO DET CHIP NAME' in myfits[0].header:
+                self.detectorID = myfits[0].header['HIERARCH ESO DET CHIP NAME']
+            elif self.instrument=='panic':
+                self.detectorID = 'HAWAII-2RG'
+            else:
+                self.detectorID = 'UNKNOWN'
         except:
             log.warning("Cannot find HIERARCH ESO DET CHIP NAME")
             self.detectorID='unknown'
                
-        #RunID
+        # RunID
         self.runID=-1
         
-        #OB_ID : Observation Block Id
+        # OB_ID : Observation Block Id
         try:
-            if self.instrument=='hawki':
+            if self.instrument=='hawki' and 'HIERARCH ESO OBS ID' in myfits[0].header:
                 self.obID = myfits[0].header['HIERARCH ESO OBS ID']
             elif self.instrument=='omega2000':
                 self.obID = myfits[0].header['POINT_NO'] # for O2000
@@ -705,7 +852,7 @@ class ClFits (object):
             log.warning("Cannot find OB_ID keyword : %s:",str(e))
             self.obID = -1
                
-        #OB_PAT : Observation Block Pattern
+        # OB_PAT : Observation Block Pattern
         try:
             if self.instrument=='hawki':
                 self.obPat = myfits[0].header['HIERARCH ESO TPL ID']
@@ -722,7 +869,7 @@ class ClFits (object):
             log.warning("Cannot find keyword : %s:",str(e))
             self.obPat = -1
                    
-        #PAT_EXPN : Pattern Exposition Number (expono of noexp)
+        # PAT_EXPN : Pattern Exposition Number (expono of noexp)
         try:
             if self.instrument=='hawki':
                 self.pat_expno = myfits[0].header['HIERARCH ESO TPL EXPNO']
@@ -753,7 +900,7 @@ class ClFits (object):
                     self.pat_noexp = -1 # for PANIC using MIDAS or whatever
             else:
                 self.pat_noexp = -1
-        except Exception,e:
+        except Exception, e:
             log.warning("Cannot find keyword : %s:",str(e))
             self.pat_noexp = -1
             
@@ -785,20 +932,19 @@ class ClFits (object):
         if 'PIXSCALE' in myfits[0].header:
             self.pix_scale = float(myfits[0].header['PIXSCALE']) * self.binning
         else:
-            if self.instrument=='omega2000':
+            if self.instrument == 'omega2000':
                 self.pix_scale = 0.45 * self.binning
-            elif self.instrument=='panic':
+            elif self.instrument == 'panic':
                 self.pix_scale = 0.45 * self.binning
-            elif self.instrument=='roper':  # roperT150
+            elif self.instrument == 'roper':  # roperT150
                 self.pix_scale = 0.23 * self.binning
-            elif self.instrument=='ropert90':
+            elif self.instrument == 'ropert90':
                 self.pix_scale = 0.386 * self.binning
-            elif self.instrument=='hawki':
+            elif self.instrument == 'hawki':
                 self.pix_scale = 0.106 * self.binning
             else:
                 # default scale ?
                 self.pix_scale = 0.45 * self.binning
-
 
         # 
         # Close the file. Some updates can be done (PRESS1, ...) but it mustn't
@@ -809,25 +955,9 @@ class ClFits (object):
             log.error("Error while closing FITS file %s   : %s",
                       self.pathname, str(e))
         
-            
-    def addHistory(self, string_history):
-        """ Add a history keyword to the header
-            NOTE: The update is only done in memory-header(my_header). To flush to disk, we should
-            to write/update to a new file. 
-            
-            STILL NOT USED !!!!
-        """
-        log.warning("Header not updated nicely !!")
-        try:
-            #t=pyfits.open(self.pathname,'update')
-            self.my_header.add_history(string_history)
-            #t.close(output_verify='ignore')
-            log.warning('History added')
-        except:
-            log.error('Error while adding history to header')
-            
+        #log.debug("End of FITS recognition: %s"%self.pathname)
         
-        
+
     def print_info(self):
         print "---------------------------------"
         print "Fichero   : ", self.pathname
@@ -841,9 +971,10 @@ class ClFits (object):
         print "RA        : ", self.ra
         print "Dec       : ", self.dec
         print "MJD       : ", self.mjd
+        print "OB_ID     : ", self.getOBId()
+        print "NoExp     : ", self.getNoExp()
+        print "ExpNo     : ",self.getExpNo()
         print "---------------------------------"
-
-        
       
 ################################################################################            
 #  Useful function to check data integrity
@@ -908,8 +1039,8 @@ def isaFITS(filepath):
     
     if os.path.exists(filepath):
         try:
-            fd = pyfits.open(filepath, ignore_missing_end=True)
-            if fd[0].header['SIMPLE']==True:
+            fd = fits.open(filepath, ignore_missing_end=True)
+            if fd[0].header['SIMPLE'] == True:
                 return True
             else:
                 return False
@@ -920,7 +1051,7 @@ def isaFITS(filepath):
 
 def fits_simple_verify(fitsfile):
     """
-    Performs 2 simple checks on the input fitsfile, which is a string
+    Performs two simple checks on the input fitsfile, which is a string
     containing a path to a FITS file.  First, it checks that the first card is
     SIMPLE, and second it checks that the file 2880 byte aligned.
     
@@ -929,16 +1060,20 @@ def fits_simple_verify(fitsfile):
     Raises:
       ValueError:  if either of the 2 checks fails
       IOError:     if fitsfile doesn't exist
+
+    Returns
+    -------
+    file_size: the current size of the fitsfile just read.  
     """
     
     if not os.path.exists(fitsfile):
         raise IOError("file '%s' doesn't exist" % fitsfile)
 
 
-    f = open(fitsfile,"readonly")
+    f = open(fitsfile, "readonly")
         
     FITS_BLOCK_SIZE = 2880
-    
+
     try:
         # check first card name
         card = f.read(len("SIMPLE"))
@@ -946,16 +1081,21 @@ def fits_simple_verify(fitsfile):
             raise ValueError("input file is not a FITS file")
 
         # check file size
-        stat_result = os.stat(fitsfile)
-        file_size = stat_result.st_size
-        # check that file_size>fits_block_size*10 to be sure all the header/s content can be read     
-        if file_size % FITS_BLOCK_SIZE != 0 or file_size<FITS_BLOCK_SIZE*10:
+        file_size = os.stat(fitsfile).st_size
+        #time.sleep(0.1)
+        #while file_size != os.stat(fitsfile).st_size:
+        #    time.sleep(0.1)
+        #    file_size = os.stat(fitsfile).st_size
+
+        # check that file_size>fits_block_size*5 to be sure all the header/s content can be read     
+        if (file_size < FITS_BLOCK_SIZE * 4) or (file_size % FITS_BLOCK_SIZE) != 0:
             log.warning("FITS file is not 2880 byte aligned (corrupted?) or file_size too small")
             raise ValueError("FITS file is not 2880 byte aligned (corrupted?) or file_size too small")
+    # Exceptions are re-raised after the finally clause has been executed
     finally:
         f.close()
             
-
+    return file_size
 		
 ################################################################################            
 #  Main for Testing
@@ -969,7 +1109,7 @@ if __name__ == "__main__":
     
     if len(sys.argv)>1:
         try:
-            dr = ClFits(sys.argv[1]) #"/disk-a/caha/panic/DATA/data_mat/skyflat0020.fits")
+            dr = ClFits(sys.argv[1])
             dr.print_info()
             print dr.isTwFlat()
         except Exception, e:

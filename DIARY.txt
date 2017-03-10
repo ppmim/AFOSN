@@ -1,0 +1,5 @@
+2017-03-10
+==========
+- Tras las nueva version de AFOSN, se calibran la mayoría de las imágenes: 
+3637 resueltas de 3667, es decir, sólo 30 son se resolvieron, de las cuales 13 eran Flats
+que tenian el IMAGETYP mal (LIGHT).

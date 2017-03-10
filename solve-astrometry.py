@@ -33,9 +33,9 @@ import glob
 from optparse import OptionParser
 
 import pyfits
-import sys
 import logging as log
 import time
+import datetime
 
 
 # TODO
@@ -62,7 +62,7 @@ def readHeader(filename):
     
     try:
         fits = clfits.ClFits(filename)
-    except Exception,e:
+    except Exception, e:
         msg = "Error reading FITS file: " + filename
         log.error(msg)
         log.error(str(e))
@@ -78,7 +78,7 @@ def readHeader(filename):
         return (scale, ra, dec, instrument, is_science)
         
     
-def solveField(filename, tmp_dir, pix_scale=None):
+def solveField(filename, tmp_dir, pix_scale=None, blind=False):
     """
     Do astrometric calibration to the given filename using Astrometry.net 
     function 'solve-field'
@@ -127,38 +127,48 @@ def solveField(filename, tmp_dir, pix_scale=None):
     # We must distinguish different cases
     #
 
+    # 0) blind calibration
+    if blind:
+        log.debug("Blind calibration, nothing is supposed")
+        str_cmd = "%s/solve-field -O -p -D %s -m %s %s\
+        "% (path_astrometry, tmp_dir, tmp_dir, filename)
+        
     # 1) RA, Dec and Scale are known
-    if ra != -1 and dec != -1 and scale != -1:
+    elif ra != -1 and dec != -1 and scale != -1:
         log.debug("RA, Dec and Scale are known")
         # To avoid problems with wrong RA,Dec coordinates guessed, a wide 
         # radius is used (0.5 degrees)
         # Although --downsample is used, scale does not need to be modified
-        str_cmd = "%s/solve-field -O -p --scale-units arcsecperpix --scale-low %s \
-        --scale-high %s --ra %s --dec %s --radius 0.5 -D %s %s --downsample 2\
-        "%(path_astrometry, scale-0.05, scale+0.05, ra, dec, tmp_dir, filename)
+        str_cmd = "%s/solve-field --cpulimit 60 -O -p --scale-units arcsecperpix --scale-low %s \
+        --scale-high %s --ra %s --dec %s --radius 0.5 -D %s -m %s %s --downsample 2\
+        "%(path_astrometry, scale-0.05, scale+0.05, ra, dec, tmp_dir, tmp_dir, filename)
     # 2) RA, Dec are unknown but scale is
-    elif ra == -1 or dec ==-1 :
+    elif (ra == -1 or dec == -1) and scale!=-1:
         log.debug("RA, Dec are unknown but scale is")
         str_cmd = "%s/solve-field -O -p --scale-units arcsecperpix --scale-low %s \
-        --scale-high %s -D %s %s\
-        "%(path_astrometry, scale-0.1, scale+0.1, tmp_dir, filename)
-    # 3) None is known -- blind calibration
-    if (ra==-1 or dec==-1) and scale==-1:
+        --scale-high %s -D %s -m %s %s\
+        "% (path_astrometry, scale-0.1, scale+0.1, tmp_dir, tmp_dir, filename)
+    elif (ra != -1 and dec != -1):
+        str_cmd = "%s/solve-field --cpulimit 60 -O -p  \
+        --ra %s --dec %s --radius 0.5 -D %s -m %s %s --downsample 2\
+        "%(path_astrometry, ra, dec, tmp_dir, tmp_dir, filename)
+    # 4) None is known -- blind calibration
+    else:
         log.debug("Nothing is known")
-        str_cmd = "%s/solve-field -O -p -D %s %s\
-        "%(path_astrometry, tmp_dir, filename)
+        str_cmd = "%s/solve-field -O -p -D %s -m %s %s\
+        "% (path_astrometry, tmp_dir, tmp_dir, filename)
     
-    log.debug("CMD="+str_cmd)
+    log.debug("CMD=" + str_cmd)
     
     try:
         p = subprocess.Popen(str_cmd, bufsize=0, shell=True, 
                              stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              close_fds=True)
-    except Exception, e:
+    except Exception, ex:
         log.error("Some error while running subprocess: " + str_cmd)
-        log.error(str(e))
-        raise e
+        log.error(str(ex))
+        raise ex
 
     # Warning:
     # We use communicate() rather than .stdin.write, .stdout.read or .stderr.read 
@@ -183,8 +193,16 @@ def solveField(filename, tmp_dir, pix_scale=None):
         logging.info("Field solved !")
         return filename
     else:
-        log.error("Field was not solved.")
-        raise Exception("Field was not solved")
+        # Then, try blind search (without coordinates)
+        if not blind:
+            log.error("First try to solve failed. Lets try again...")
+            try:
+                return solveField(filename, tmp_dir, 
+                                  pix_scale=None, blind=True)
+            except Exception, ex:
+                raise ex
+        else:
+            raise Exception("Field was not solved")
             
 
 def calc(args):
@@ -201,8 +219,11 @@ def runMultiSolver(files, tmp_dir, pix_scale=None):
 
     # use all CPUs available in the computer
     n_cpus = multiprocessing.cpu_count()
-    log.debug("N_CPUS :" + str(n_cpus))
     pool = multiprocessing.Pool(processes=n_cpus)
+    
+    log.debug("N_CPUS :" + str(n_cpus))
+    log.debug("FILES_TO_SOLVE :" + str(files))
+    log.debug("TMP_DIR :" + str(tmp_dir))
     
     results = []
     solved = []
@@ -212,9 +233,9 @@ def runMultiSolver(files, tmp_dir, pix_scale=None):
             # Instead of pool.map() that blocks until
             # the result is ready, we use pool.map_async()
             results += [pool.map_async(calc, [red_parameters])]
-        except Exception,e:
+        except Exception, ex:
             log.error("Error processing file: " + file)
-            log.error(str(e))
+            log.error(str(ex))
             
     for result in results:
         try:
@@ -333,18 +354,21 @@ in principle previously reduced, but not mandatory.
                 filelist = [line.replace( "\n", "") 
                             for line in fileinput.input(options.source_file)]
         elif os.path.isdir(options.source_file):
-            filelist = glob.glob(options.source_file+"/*.fit*")
+            filelist = glob.glob(options.source_file + "/*.fit")
+            filelist += glob.glob(options.source_file + "/*.fits")
             # Look for subdirectories
             if options.recursive:
                 subdirectories = [ name for name in os.listdir(options.source_file) if os.path.isdir(os.path.join(options.source_file, name)) ]
                 for subdir in subdirectories:
-                    filelist += glob.glob(os.path.join(options.source_file, subdir)+"/*.fit*")
+                    filelist += glob.glob(os.path.join(options.source_file, subdir) + "/*.fit")
+                    filelist += glob.glob(os.path.join(options.source_file, subdir) + "/*.fits")
+                    
                 
         # Parallel approach        
         files_solved = runMultiSolver(filelist, options.output_dir, 
                                       options.pixel_scale)
         for file in filelist:
-            if file not in files_solved and file+".not_science" not in files_solved:
+            if file not in files_solved and file + ".not_science" not in files_solved:
                 files_not_solved.append(file)
         
         # Serial approach
@@ -380,6 +404,17 @@ in principle previously reduced, but not mandatory.
     log.info("--------------------")
     log.info(files_not_solved)
     log.info("Time : %s"%(toc-tic))
+    
+    # Write files (solved/not_solved) to txt file
+    f_solved_txt = 'solved-{:%Y-%m-%dT%H:%M:%S}.txt'.format(datetime.datetime.now())
+    f_not_solved_txt = 'not_solved-{:%Y-%m-%dT%H:%M:%S}.txt'.format(datetime.datetime.now())
+    with open(f_solved_txt, "w") as solved_txt:
+        for item in files_solved:
+            solved_txt.write("%s\n" % item)
+    with open(f_not_solved_txt, "w") as not_solved_txt:
+        for item in files_not_solved:
+            not_solved_txt.write("%s\n" % item)
+    
     sys.exit()
         
     
