@@ -160,6 +160,10 @@ def solveField(filename, tmp_dir, pix_scale=None, blind=False):
     
     log.debug("CMD=" + str_cmd)
     
+    clean_output = True
+    if clean_output:
+        str_cmd += " --corr none --rdls none --match none --wcs none"
+
     try:
         p = subprocess.Popen(str_cmd, bufsize=0, shell=True, 
                              stdin=subprocess.PIPE,
@@ -181,19 +185,31 @@ def solveField(filename, tmp_dir, pix_scale=None, blind=False):
     #print "STDOUTDATA=",stdoutdata
     #print "STDERRDATA=",stderrdata
     
-    if len(solve_out)>1:
+    if len(solve_out) > 1:
         logging.info("Solve-field output:")
         print solve_out
     #
     # Look for filename.solved to know if field was solved
     #
     solved_file = tmp_dir + "/" + os.path.splitext(os.path.basename(filename))[0] + ".solved"
-    #print "FILE=",solved_file
+
+    # whether we succeeded or failed, clean up
+    try:
+        os.remove(solved_file.split('.solved')[0] + '.axy')
+    except OSError:
+        pass    
+    # If solved      
     if os.path.exists(solved_file):
         logging.info("Field solved !")
+        # clean up        
+        try:
+            os.remove(solved_file.split('.solved')[0] + '-indx.xyls')
+            os.remove(solved_file.split('.solved')[0] + '.solved')
+        except OSError:
+            pass
         return filename
+    # If not solved, then second try blind search (without coordinates)
     else:
-        # Then, try blind search (without coordinates)
         if not blind:
             log.error("First try to solve failed. Lets try again...")
             try:
@@ -262,7 +278,69 @@ def runMultiSolver(files, tmp_dir, pix_scale=None):
     log.info("Finished parallel calibration")
     
     return solved
-                  
+
+def patch_header(header):
+    """
+    Add minimal information to the FITS headers.
+
+    Parameters
+    ----------
+    dir : str, optional
+        Directory containing the files to be patched. Default is the current
+        directory, ``.``
+
+    new_file_ext : str, optional
+        Name added to the FITS files with updated header information. It is
+        added to the base name of the input file, between the old file name
+        and the `.fit` or `.fits` extension. Default is 'new'.
+
+    save_location : str, optional
+        Directory to which the patched files should be written, if not `dir`.
+
+    overwrite : bool, optional
+        Set to `True` to replace the original files.
+
+    purge_bad : bool, optional
+        Remove "bad" keywords form header before any other processing. See
+        :func:`purge_bad_keywords` for details.
+
+    add_time : bool, optional
+        If ``True``, add time information (e.g. JD, LST); see
+        :func:`add_time_info` for details.
+
+    add_apparent_pos : bool, optional
+        If ``True``, add apparent position (e.g. alt/az) to headers. See
+        :func:`add_object_pos_airmass` for details.
+
+    add_overscan : bool, optional
+        If ``True``, add overscan keywords to the headers. See
+        :func:`add_overscan_header` for details.
+
+    fix_imagetype : bool, optional
+        If ``True``, change image types to IRAF-style. See
+        :func:`change_imagetype_to_IRAF` for details.
+
+    add_unit : bool, optional
+        If ``True``, add image unit to FITS header.
+    """
+
+    # remove useless keyword
+    useless_keyowrds = ['WCSDIM', 'LTM1_1','LTM2_2', 'WAT0_001', 'WAT1_001', 
+                       'WAT2_001', 'RADECSYS','SWCREATE','SWOWNER']
+
+    for key in useless_keywords:
+        header.pop(key, None)
+
+    # Now, remove all keword starting with '_'
+    for key in header:
+         if key.startswith('_'):
+            header.pop(key, None)
+
+    # Remove all comments starting with 'Original'
+    for card in header.cards:
+        if card[0]=='COMMENT' and card[1].startswith('Original'): 
+            del card
+    
 ###############################################################################
 # main
 ###############################################################################
