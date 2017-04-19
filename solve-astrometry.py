@@ -78,23 +78,32 @@ def readHeader(filename):
         return (scale, ra, dec, instrument, is_science)
         
     
-def solveField(filename, tmp_dir, pix_scale=None, blind=False):
+def solveField(filename, tmp_dir, pix_scale=None, blind=False, patch_calibs=True):
     """
     Do astrometric calibration to the given filename using Astrometry.net 
     function 'solve-field'
     
     Parameters
     ----------
+    filename : str
+        File name of the FITS file to resolve.
+
+    tmp_dir: str
+        Directory where output (temporal and results) files are saved
     
     pix_scale: float
         Default pixel scale to use in case it cannot be find out from header
     
-    tmp_dir: str
-        Directory where output files are saved
+    blind: bool
+        When True, a blind calibration with no reference coordinates is done.
+
+    patch_calibs: bool
+        When True, the calibratino files (bias, dark, flat) are also patched,
+        both header and filename.      
         
     Returns
     -------
-    Filename of solved file (filename.solved) 
+    Original Filename of solved file (filename) 
     
     """
     
@@ -114,8 +123,25 @@ def solveField(filename, tmp_dir, pix_scale=None, blind=False):
         scale = pix_scale
         
     if not is_science:
-        log.info("Frame %s is not a science frame"%filename)
-        return filename + ".not_science"
+        log.info("Frame %s is not a science frame" % filename)
+        if patch_calibs:
+            # patch the header
+            with pyfits.open(filename, mode='update') as new_fits:
+                logging.info("Patching the header")
+                patch_header(new_fits[0].header)
+            # patch the filename
+            new_fn = patch_filename(filename, rename=False)
+
+            # Move to output dir (as science frames solved)
+            try:
+                os.rename(new_fn, tmp_dir + "/" + os.path.basename(new_fn))
+            except OSError, ex:
+                logging.error("Cannot rename file %s" % new_fn)
+                return new_fn + ".not_science"          
+            else:
+                return tmp_dir + "/" + os.path.basename(new_fn) + ".not_science"
+        else:
+            return filename + ".not_science"
         
     logging.debug("Starting to solve-field for: %s  Scale=%s  RA= %s Dec= %s \
     INSTRUMENT= %s"%(filename, scale, ra , dec, instrument))
@@ -158,11 +184,12 @@ def solveField(filename, tmp_dir, pix_scale=None, blind=False):
         str_cmd = "%s/solve-field -O -p -D %s -m %s %s\
         "% (path_astrometry, tmp_dir, tmp_dir, filename)
     
-    log.debug("CMD=" + str_cmd)
     
     clean_output = True
     if clean_output:
         str_cmd += " --corr none --rdls none --match none --wcs none"
+    
+    log.debug("CMD=" + str_cmd)
 
     try:
         p = subprocess.Popen(str_cmd, bufsize=0, shell=True, 
@@ -207,7 +234,15 @@ def solveField(filename, tmp_dir, pix_scale=None, blind=False):
             os.remove(solved_file.split('.solved')[0] + '.solved')
         except OSError:
             pass
-        return filename
+        # patch the header
+        with pyfits.open(solved_file.split('.solved')[0] + '.new', mode='update') as new_fits:
+            logging.info("Patching the header")
+            patch_header(new_fits[0].header)
+        
+        # patch the filename        
+        new_fn = patch_filename(solved_file.split('.solved')[0] + '.new', ext="fits")
+
+        return new_fn
     # If not solved, then second try blind search (without coordinates)
     else:
         if not blind:
@@ -279,68 +314,82 @@ def runMultiSolver(files, tmp_dir, pix_scale=None):
     
     return solved
 
+    
+
 def patch_header(header):
     """
-    Add minimal information to the FITS headers.
+    Patch the FITS header.
 
     Parameters
     ----------
-    dir : str, optional
-        Directory containing the files to be patched. Default is the current
-        directory, ``.``
+    header : object (FITS header class. This class exposes both a dict-like 
+                    interface and a list-like interface to FITS headers.)
+        Header to be patched. 
 
-    new_file_ext : str, optional
-        Name added to the FITS files with updated header information. It is
-        added to the base name of the input file, between the old file name
-        and the `.fit` or `.fits` extension. Default is 'new'.
-
-    save_location : str, optional
-        Directory to which the patched files should be written, if not `dir`.
-
-    overwrite : bool, optional
-        Set to `True` to replace the original files.
-
-    purge_bad : bool, optional
-        Remove "bad" keywords form header before any other processing. See
-        :func:`purge_bad_keywords` for details.
-
-    add_time : bool, optional
-        If ``True``, add time information (e.g. JD, LST); see
-        :func:`add_time_info` for details.
-
-    add_apparent_pos : bool, optional
-        If ``True``, add apparent position (e.g. alt/az) to headers. See
-        :func:`add_object_pos_airmass` for details.
-
-    add_overscan : bool, optional
-        If ``True``, add overscan keywords to the headers. See
-        :func:`add_overscan_header` for details.
-
-    fix_imagetype : bool, optional
-        If ``True``, change image types to IRAF-style. See
-        :func:`change_imagetype_to_IRAF` for details.
-
-    add_unit : bool, optional
-        If ``True``, add image unit to FITS header.
     """
 
     # remove useless keyword
-    useless_keyowrds = ['WCSDIM', 'LTM1_1','LTM2_2', 'WAT0_001', 'WAT1_001', 
+    useless_keywords = ['WCSDIM', 'LTM1_1','LTM2_2', 'WAT0_001', 'WAT1_001', 
                        'WAT2_001', 'RADECSYS','SWCREATE','SWOWNER']
 
     for key in useless_keywords:
+        # If key is not in header, return None.
         header.pop(key, None)
 
     # Now, remove all keword starting with '_'
     for key in header:
-         if key.startswith('_'):
+        if key.startswith('_'):
+            # If key is not in header, return None.
             header.pop(key, None)
-
-    # Remove all comments starting with 'Original'
-    for card in header.cards:
-        if card[0]=='COMMENT' and card[1].startswith('Original'): 
-            del card
     
+    # Remove all comments starting with 'Original'
+    new_cards = [card for card in header.cards 
+        if not (card[0]=='COMMENT' and card[1].startswith('Original'))]
+    header.cards._header._cards = new_cards
+
+    # patch OBSEVER keyword (remove @iaa.es)
+    try:
+        if header['OBSERVER']:
+            header['OBSERVER'] = header['OBSERVER'].split('@')[0]
+        else:
+            header['OBSERVER'] = 'osn_astronomer'
+    except Exception, e:
+        pass
+
+def patch_filename(filename, rename= True, ext=None):
+    """
+    Patch the FITS filename and rename the file on disk.
+
+    Parameters
+    ----------
+    filename : str 
+        Full file path of the file to be checked and patched if needed.
+
+    Returns
+    -------
+    New patched filename.   
+
+    """
+    # Replace non-standar or characters known to the GAVO staff to be 
+    # hazardous in URLs.   
+    original = filename
+    import re
+    for c in re.findall(r'[^A-Za-z0-9_\-\\\/.]', filename):
+        filename = filename.replace(c, "_")
+
+    # if required, rename extension
+    if ext:
+        filename = filename.replace(filename.split(".")[-1], ext)
+
+    if rename:
+        try:
+            os.rename(original, filename)       
+        except Exception, e:
+            logging.error("Cannot rename file %s" % new_fn)
+            return original
+        
+    return filename   
+
 ###############################################################################
 # main
 ###############################################################################
@@ -359,7 +408,7 @@ in principle previously reduced, but not mandatory.
     parser.add_option("-s", "--source",
                   action="store", dest="source_file",
                   help="Source file list of data frames. "
-                  "It can be a file or directory name.")
+                  "It can be either a file or a directory name.")
     
     parser.add_option("-o", "--output_dir",
                   action="store", dest="output_dir", default="/tmp",
@@ -445,20 +494,10 @@ in principle previously reduced, but not mandatory.
         # Parallel approach        
         files_solved = runMultiSolver(filelist, options.output_dir, 
                                       options.pixel_scale)
-        for file in filelist:
-            if file not in files_solved and file + ".not_science" not in files_solved:
-                files_not_solved.append(file)
-        
-        # Serial approach
-                    
-        #for file in filelist:
-        #    try:
-        #        solveField(file, options.output_dir, options.pixel_scale)
-        #        files_solved.append(file)                
-        #    except Exception,e:
-        #        files_not_solved.append(file)
-        #        logging.error("Error solving file %s  [%s] "%(file,str(e)))
-                    
+        for f in filelist:
+            new_f = patch_filename(f, rename=False)
+            if new_f not in files_solved and new_f + ".not_science" not in files_solved:
+                files_not_solved.append(new_f)
     else:
         logging.error("Source file %s does not exists",options.source_file)
 
@@ -473,9 +512,9 @@ in principle previously reduced, but not mandatory.
     # print "------------------------"    
     # print files_not_solved
     
-    log.info("No. files = %s"%len(filelist))
+    log.info("No. files = %s" % len(filelist))
     # calibracion files (bias, dark, flats, ...) are considered as solved files
-    log.info("No. files solved = %s"%(len(filelist)-len(files_not_solved)))
+    log.info("No. files solved = %s" % (len(filelist) - len(files_not_solved)))
     log.info("----------------")
     log.info(files_solved)
     log.info("No. files NOT solved = %s", len(files_not_solved))
