@@ -230,6 +230,7 @@ class ClFits (object):
         return (self.type=="FOCUS") 
     
     def isScience(self):
+        # type: () -> object
         return (self.type.count("SCIENCE") or self.type.count("STD"))
     
     def isRawScience(self):
