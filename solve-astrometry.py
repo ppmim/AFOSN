@@ -107,7 +107,7 @@ def solveField(filename, tmp_dir, pix_scale=None, blind=False, patch_calibs=True
         
     Returns
     -------
-    Original Filename of solved file (filename) 
+    New filename of just solved file (or Exception if not solved).
     
     """
 
@@ -223,12 +223,12 @@ def solveField(filename, tmp_dir, pix_scale=None, blind=False, patch_calibs=True
     #
     solved_file = tmp_dir + "/" + os.path.splitext(os.path.basename(filename))[0] + ".solved"
 
-    # whether we succeeded or failed, clean up
+    # either succeeded or failed, clean up
     try:
         os.remove(solved_file.split('.solved')[0] + '.axy')
     except OSError:
         pass
-        # If solved
+    ## If solved
     if os.path.exists(solved_file):
         logging.info("Field solved !")
         # clean up        
@@ -246,7 +246,7 @@ def solveField(filename, tmp_dir, pix_scale=None, blind=False, patch_calibs=True
         new_fn = patch_filename(solved_file.split('.solved')[0] + '.new', ext='fits')
 
         return new_fn
-    # If not solved, then second try blind solve (without coordinates)
+    ## If not solved, then second try blind solve (without coordinates)
     else:
         if not blind:
             log.error("First try to solve failed. Lets try again...")
@@ -282,6 +282,7 @@ def runMultiSolver(files, tmp_dir, pix_scale=None):
 
     results = []
     solved = []
+    not_solved = []
     for file in files:
         red_parameters = (file, tmp_dir, pix_scale)
         try:
@@ -289,7 +290,8 @@ def runMultiSolver(files, tmp_dir, pix_scale=None):
             # the result is ready, we use pool.map_async()
             results += [pool.map_async(calc, [red_parameters])]
         except Exception as ex:
-            log.error("Error processing file: " + file)
+            not_solved.append(file)
+            log.error("Error processing/solving file: %s\n" % file)
             log.error(str(ex))
 
     for result in results:
@@ -298,8 +300,8 @@ def runMultiSolver(files, tmp_dir, pix_scale=None):
             # the 0 index is *ONLY* required if map_async is used !!!
             solved.append(result.get()[0])
         except Exception as e:
-            log.error("Cannot process file %s\n" + str(e))
-
+            log.error("Cannot get result: %s\n" %(str(e)))
+            
 
     # Prevents any more tasks from being submitted to the pool. 
     # Once all the tasks have been completed the worker 
@@ -312,7 +314,7 @@ def runMultiSolver(files, tmp_dir, pix_scale=None):
 
     log.info("Finished parallel calibration")
 
-    return solved
+    return solved, not_solved
 
 
 def patch_header(header):
@@ -356,7 +358,7 @@ def patch_header(header):
         pass
 
 
-def patch_filename(filename, rename=True, ext=None):
+def patch_filename(filename, rename=True, ext=None, check_data_obs=True):
     """
     Patch the FITS filename and optionally rename the file on disk.
 
@@ -370,20 +372,55 @@ def patch_filename(filename, rename=True, ext=None):
     
     ext: str
        Filename extension to be set replacing the original filename extension.
- 
+
+    check_data_obs: bool
+        True if required a prefix on filename based on DATE-OBS keyword; it 
+        compare to DATE-OBS, and in case of mismatch, it is added as prefix.
 
     Returns
     -------
     New patched filename.   
 
     """
+    original = filename
+        
     # Replace non-standar or characters known to the GAVO staff to be 
     # hazardous in URLs.   
-    original = filename
     import re
     for c in re.findall(r'[^A-Za-z0-9_\-\\\/.]', filename):
         filename = filename.replace(c, "_")
-
+    
+    # Check the filename prefix is YYYYMMDD.hhmmss obteined from DATE-OBS 
+    # keyword (YYYY-MM-DDThh:mm:ss).
+    # Due to Astrometry.net output solved files are saved on the same directory,
+    # it needed that each file has an unique filename to avoid overwriting.
+    base_filename = os.path.basename(filename) 
+    if check_data_obs:
+        if len(base_filename) > 15:
+            prefix = base_filename[:15]
+        else:
+            prefix = ""
+        # read the DATE-OBS keyword        
+        try:
+            logging.info("Original filename: %s" % original)
+            with fits.open(original) as f:
+                date_obs = f[0].header['DATE-OBS'][:19]
+       
+            date_obs = date_obs.replace('-','')
+            date_obs = date_obs.replace('T','.')
+            date_obs = date_obs.replace(':','')
+            if date_obs != prefix:
+                print "DATE_OBS=",date_obs
+                print "prefix=",prefix
+                # prefix does not match, then **add** new prefix based on date_obs
+                base_filename = date_obs + "." + base_filename
+                filename = os.path.dirname(filename) + "/" + base_filename
+                logging.info("New filename -> %s" %filename)                                   
+ 
+        except Exception, e:
+            logging.error("Cannot read DATA-OBS from %s" % original)
+            raise e
+                                                
     # if required, rename extension
     if ext:
         filename = filename.replace(filename.split(".")[-1], ext)
@@ -512,13 +549,15 @@ in principle previously reduced, but not mandatory.
                     filelist += glob.glob(os.path.join(options.source_file, subdir) + "/*.fits")
 
         # Parallel approach        
-        files_solved = runMultiSolver(filelist, options.output_dir,
+        files_solved, files_not_solved = runMultiSolver(filelist, options.output_dir,
                                       options.pixel_scale)
-        for f in filelist:
+        """for f in filelist:
             new_f = patch_filename(f, rename=False, ext='fits')
             new_f = options.output_dir + "/" + os.path.basename(new_f)
             if new_f not in files_solved and new_f + ".not_science" not in files_solved:
                 files_not_solved.append(new_f)
+        """
+        
     else:
         logging.error("Source file %s does not exists", options.source_file)
 
